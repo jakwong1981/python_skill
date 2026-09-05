@@ -8,7 +8,7 @@ token.json
 
 # 程式產生之輸出
 model_keys_review.xlsx
-pbandai_products_*.xlsx
+pbandai_products*.xlsx
 
 # macOS
 .DS_Store

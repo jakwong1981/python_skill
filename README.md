@@ -8,7 +8,7 @@ A collection of standalone Python utilities for macOS.
 |------|---------|-------|--------|
 | `consolidate_model_keys.py` | Scan macOS for AI-model / API keys across shell profiles, `.env` files, and AI agent config directories; identify the provider and consuming agent for each key; export a consolidated Excel spreadsheet. | `python3 consolidate_model_keys.py [--full] [--out PATH]` | `~/Desktop/model_keys_review.xlsx` (masked by default; `--full` for raw values, file set to `chmod 600`) |
 | `parser_gmail_bill.py` | Search Gmail for credit-card transaction emails, extract card info, amounts (original / HKD), and receipt URLs; export to CSV. | `python3 parser_gmail_bill.py` | `bill.csv` (only written when at least one email contains an amount) |
-| `pbandai_scraper_v2.py` | Scrape P-Bandai HK product listings using Playwright (real browser to bypass Cloudflare). | `python3 pbandai_scraper_v2.py` | `pbandai_products_<timestamp>.json` / `.csv` / `.xlsx` |
+| `pbandai_scraper_v2.py` | Scrape P-Bandai HK product listings using Playwright (real browser to bypass Cloudflare). | `python3 pbandai_scraper_v2.py` | `pbandai_products.csv` / `.json` / `.xlsx` (fixed names) |
 
 ## Details
 
@@ -40,9 +40,9 @@ Parses Gmail for credit-card transaction emails and exports a consolidated bill 
 
 Scrapes product listings from P-Bandai HK (Gunpla / assembly-model category by default) using Playwright to render the page in a real Chromium browser, avoiding Cloudflare blocks:
 
-1. **Loads** the P-Bandai search page in headless Chromium and waits for product cards to appear.
+1. **Loads** the P-Bandai category search page (gunpla, `_f_categories=04-004`) in headless Chromium and waits for product cards to appear, falling back to the shop page when the search endpoint is unavailable.
 2. **Extracts** each product's name, price, status, and item URL via in-page JavaScript.
-3. **Exports** the results as timestamped JSON, CSV, and formatted Excel files.
+3. **Exports** the results as fixed-name `pbandai_products.csv`, `.json`, and `.xlsx` files (overwritten on each run).
 
 **Setup**: `pip3 install playwright` then `python3 -m playwright install chromium`. The output files are git-ignored.
 
