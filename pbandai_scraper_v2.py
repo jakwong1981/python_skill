@@ -61,7 +61,7 @@ def _new_context(browser):
     )
 
 
-def _wait_for_listing(page, timeout_s=20):
+def _wait_for_listing(page, timeout_s=100):
     """Poll until product cards appear or the site's error page shows up."""
     deadline = time.time() + timeout_s
     while time.time() < deadline:
@@ -141,7 +141,7 @@ def _extract_stable(page, stable_s=3, max_wait_s=20):
     return _extract_products(page)
 
 
-def _load_page(browser, url, attempts=3):
+def _load_page(browser, url, attempts=20):
     """Load `url` in a fresh context, retrying while the search endpoint is flaky."""
     for attempt in range(1, attempts + 1):
         context = _new_context(browser)
