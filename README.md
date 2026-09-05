@@ -7,6 +7,7 @@ A collection of standalone Python utilities for macOS.
 | File | Purpose | Usage | Output |
 |------|---------|-------|--------|
 | `consolidate_model_keys.py` | Scan macOS for AI-model / API keys across shell profiles, `.env` files, and AI agent config directories; identify the provider and consuming agent for each key; export a consolidated Excel spreadsheet. | `python3 consolidate_model_keys.py [--full] [--out PATH]` | `~/Desktop/model_keys_review.xlsx` (masked by default; `--full` for raw values, file set to `chmod 600`) |
+| `parser_gmail_bill.py` | Search Gmail for credit-card transaction emails, extract card info, amounts (original / HKD), and receipt URLs; export to CSV. | `python3 parser_gmail_bill.py` | `bill.csv` (only written when at least one email contains an amount) |
 
 ## Details
 
@@ -23,8 +24,20 @@ As developers increasingly work with multiple AI providers (OpenAI, Anthropic, G
 
 **Detected agents**: Claude Code, Codex, Hermes Agent, Gemini CLI, Cursor, Windsurf, Cline, Continue, OpenCode, OpenClaw, Qoder, and others.
 
+### parser_gmail_bill.py
+
+Parses Gmail for credit-card transaction emails and exports a consolidated bill CSV:
+
+1. **Searches** the inbox (last 30 days by default) for emails matching credit/card/payment/invoice/receipt/transaction keywords (English and Chinese).
+2. **Filters** emails by card identifiers (Visa / Mastercard / 末四碼 last-4-digits, etc.), ignores job-platform mail such as JobsDB's "job db record", and skips emails with no amount found.
+3. **Extracts** date, merchant, subject, original and HKD amounts, payment method, and receipt URL.
+4. **Exports** `bill.csv` — the file is not written when no matching transactions are found.
+
+**Setup**: requires `credentials.json` (OAuth client from Google Cloud Console) and `token.json` (generated on first run); both are git-ignored. On first execution a browser opens for Gmail authorization.
+
 ## Requirements
 
 - **Python 3.7+** (standard library only for core functionality)
 - **openpyxl** — required for Excel output (`pip install openpyxl`)
+- **google-api-python-client**, **google-auth-oauthlib** — required for Gmail parsing (`pip install google-api-python-client google-auth-oauthlib`)
 - **PyYAML** *(optional)* — improves Hermes `config.yaml` parsing; falls back to regex if absent

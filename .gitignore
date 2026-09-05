@@ -1,0 +1,10 @@
+# OAuth 憑證與令牌（含敏感資訊，切勿提交）
+credentials.json
+token.json
+
+# 程式產生之輸出
+bill.csv
+model_keys_review.xlsx
+
+# macOS
+.DS_Store
