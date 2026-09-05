@@ -27,9 +27,14 @@ import time
 SEARCH_URL = ("https://p-bandai.com/hk/search?_f_categories=04-004&offset=0"
               "&limit=100&sortType=NewArrival&_f_productStatuses=Waiting,On")
 SHOP_URL = "https://p-bandai.com/hk/shop/hobbyonlineshop"
+
+# --- Retry settings for the protected search endpoint ---
+SEARCH_ATTEMPTS = 1           # top-up tries after the shop page (raise for more)
+SEARCH_RETRY_WAIT_S = 10      # seconds to wait between search attempts
 USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 MAX_PAGES = 10
+HEADLESS = True  # set to False to watch the browser run (some bot checks behave differently)
 
 EXTRACT_JS = """() => {
     const products = [];
@@ -61,15 +66,24 @@ def _new_context(browser):
     )
 
 
-def _wait_for_listing(page, timeout_s=100):
-    """Poll until product cards appear or the site's error page shows up."""
+def _wait_for_listing(page, timeout_s=1000, error_grace_s=10):
+    """Poll until product cards appear or the site's error page shows up.
+
+    The "PAGE NOT AVAILABLE" page is the bot-protection challenge. It
+    sometimes auto-resolves after a few seconds and redirects to the real
+    listing, so keep watching for `error_grace_s` before giving up.
+    """
     deadline = time.time() + timeout_s
+    error_seen_at = None
     while time.time() < deadline:
         if page.locator('a[href*="/hk/item/"]').count() > 0:
             return True
         try:
             if "PAGE NOT AVAILABLE" in page.title():
-                return False
+                if error_seen_at is None:
+                    error_seen_at = time.time()
+                elif time.time() - error_seen_at >= error_grace_s:
+                    return False
         except Exception:
             pass
         page.wait_for_timeout(1000)
@@ -118,7 +132,7 @@ TOTAL_JS = """() => {
 }"""
 
 
-def _extract_stable(page, stable_s=3, max_wait_s=20):
+def _extract_stable(page, stable_s=3, max_wait_s=500):
     """Extract cards, waiting until the lazy-loaded card count stops growing.
 
     The listing renders a first batch of cards and may reveal more later
@@ -137,20 +151,28 @@ def _extract_stable(page, stable_s=3, max_wait_s=20):
         else:
             last_urls = urls
             stable_since = time.time()
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(100)
     return _extract_products(page)
 
 
-def _load_page(browser, url, attempts=20):
+def _load_page(browser, url, attempts=5):
     """Load `url` in a fresh context, retrying while the search endpoint is flaky."""
     for attempt in range(1, attempts + 1):
         context = _new_context(browser)
         page = context.new_page()
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            page.goto(url, wait_until="domcontentloaded", timeout=5000)
             if _wait_for_listing(page):
                 return page
             print(f"   ⚠️ Error page (attempt {attempt}/{attempts})")
+            try:
+                # The challenge may have set a cookie — retry in the SAME
+                # context before discarding it
+                page.reload(wait_until="domcontentloaded", timeout=300)
+                if _wait_for_listing(page):
+                    return page
+            except Exception:
+                pass
         except Exception as e:
             print(f"   ⚠️ Load failed (attempt {attempt}/{attempts}): {type(e).__name__}")
         context.close()
@@ -159,11 +181,38 @@ def _load_page(browser, url, attempts=20):
     return None
 
 
+CJK_RE = re.compile(r"[\u3000-\u9fff]")
+
+
+def _split_delivery_suffix(name):
+    """Split a trailing bracketed delivery note (e.g. '[2026年11月發送]') off a name."""
+    m = re.search(r"(\s*\[[^\]]*\]\s*)$", name)
+    if m:
+        return name[:m.start()], m.group(1)
+    return name, ""
+
+
+def translate_name(name):
+    """Translate an English product name to Traditional Chinese.
+
+    Uses deep-translator's free Google backend; returns None when the
+    library is not installed or the service fails.
+    """
+    try:
+        from deep_translator import GoogleTranslator
+    except ImportError:
+        return None
+    try:
+        return GoogleTranslator(source="en", target="zh-TW").translate(name)
+    except Exception:
+        return None
+
+
 def scrape_pbandai(search_url=SEARCH_URL, shop_url=SHOP_URL):
     """Scrape products using Playwright (real browser = no Cloudflare issues).
 
-    Tries the shop-based search listing first (fullest coverage), then falls
-    back to the shop page when the search endpoint returns an error page.
+    Scrapes the shop page first (statically served, reliable), then tries the
+    bot-protected search listing to top up with the full category's items.
     """
     from playwright.sync_api import sync_playwright
 
@@ -181,27 +230,50 @@ def scrape_pbandai(search_url=SEARCH_URL, shop_url=SHOP_URL):
         return added
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=HEADLESS)
 
-        # --- Primary: shop-based search listing (with pagination) ---
+        # --- Primary: shop page (statically served, not bot-protected) ---
+        print(f"🔗 Opening: {shop_url}\n")
+        context = _new_context(browser)
+        page = context.new_page()
+        shop_ok = False
+        try:
+            page.goto(shop_url, wait_until="domcontentloaded", timeout=30000)
+            shop_ok = _wait_for_listing(page)
+        except Exception as e:
+            print(f"⚠️  Shop page load failed: {type(e).__name__}: {e}\n")
+            context.close()
+        if shop_ok:
+            print("✓ Shop page loaded\n")
+            add_products(_extract_products(page))
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            page.wait_for_timeout(1500)
+            extra = add_products(_extract_stable(page, stable_s=2, max_wait_s=6))
+            if extra:
+                print(f"   Scroll: +{extra} cards\n")
+        else:
+            print("⚠️  Shop page unavailable\n")
+
+        # --- Top-up: protected search endpoint (may be bot-blocked) ---
         search_ok = False
-        for attempt in range(1, 4):
+        for attempt in range(1, SEARCH_ATTEMPTS + 1):
             context = _new_context(browser)
             page = context.new_page()
             try:
-                print(f"🔗 Opening: {search_url} (attempt {attempt}/3)\n")
+                print(f"🔗 Opening: {search_url} "
+                      f"(attempt {attempt}/{SEARCH_ATTEMPTS})\n")
                 page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
                 if _wait_for_listing(page):
                     search_ok = True
                     break
                 print("⚠️  Site returned 'PAGE NOT AVAILABLE' (attempt "
-                      f"{attempt}/3)\n")
+                      f"{attempt}/{SEARCH_ATTEMPTS})\n")
                 context.close()
             except Exception as e:
                 print(f"⚠️  Load failed: {type(e).__name__}: {e} "
-                      f"(attempt {attempt}/3)\n")
+                      f"(attempt {attempt}/{SEARCH_ATTEMPTS})\n")
                 context.close()
-            time.sleep(4)
+            time.sleep(SEARCH_RETRY_WAIT_S)
 
         if search_ok:
             print("✓ Search page loaded\n")
@@ -250,22 +322,7 @@ def scrape_pbandai(search_url=SEARCH_URL, shop_url=SHOP_URL):
                     print("   No new items — listing exhausted\n")
                     break
         else:
-            # --- Fallback: shop page (statically served, usually reliable) ---
-            print("⚠️  Search endpoint unavailable — using shop page fallback\n")
-            context = _new_context(browser)
-            page = context.new_page()
-            print(f"🔗 Opening: {shop_url}\n")
-            page.goto(shop_url, wait_until="domcontentloaded", timeout=30000)
-            if _wait_for_listing(page):
-                print("✓ Shop page loaded\n")
-                add_products(_extract_products(page))
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                page.wait_for_timeout(1500)
-                extra = add_products(_extract_stable(page, stable_s=2, max_wait_s=6))
-                if extra:
-                    print(f"   Scroll: +{extra} cards\n")
-            else:
-                print("❌ Shop page unavailable too. Try again later.\n")
+            print("⚠️  Search endpoint unavailable — keeping shop-page results only\n")
 
         browser.close()
 
@@ -294,7 +351,7 @@ def save_csv(products, output_dir=None):
         filename = "pbandai_products.csv"
     
     with open(filename, 'w', newline='', encoding='utf-8-sig') as f:
-        writer = csv.DictWriter(f, fieldnames=['name', 'price', 'status', 'url'])
+        writer = csv.DictWriter(f, fieldnames=['name', 'tc_name', 'price', 'status', 'url'])
         writer.writeheader()
         writer.writerows(products)
     
@@ -320,7 +377,7 @@ def save_xlsx(products, output_dir=None):
     ws.title = 'P-Bandai Products'
     
     # Headers
-    headers = ['#', 'Product Name', 'Price (HKD)', 'Status', 'URL']
+    headers = ['#', 'Product Name', 'TC Product Name', 'Price (HKD)', 'Status', 'URL']
     header_font = Font(bold=True, color='FFFFFF')
     header_fill = PatternFill(start_color='2F5496', end_color='2F5496', fill_type='solid')
     for col, h in enumerate(headers, 1):
@@ -333,18 +390,20 @@ def save_xlsx(products, output_dir=None):
     for i, p in enumerate(products, 1):
         ws.cell(row=i+1, column=1, value=i)
         ws.cell(row=i+1, column=2, value=p['name'])
+        ws.cell(row=i+1, column=3, value=p.get('tc_name') or '')
         price_clean = re.sub(r'[^\d.]', '', p['price'])
-        ws.cell(row=i+1, column=3, value=float(price_clean) if price_clean.replace('.', '').isdigit() else p['price'])
-        ws.cell(row=i+1, column=4, value=p['status'])
-        cell = ws.cell(row=i+1, column=5, value=p['url'])
+        ws.cell(row=i+1, column=4, value=float(price_clean) if price_clean.replace('.', '').isdigit() else p['price'])
+        ws.cell(row=i+1, column=5, value=p['status'])
+        cell = ws.cell(row=i+1, column=6, value=p['url'])
         cell.font = Font(color='0563C1', underline='single')
     
     # Column widths
     ws.column_dimensions['A'].width = 5
     ws.column_dimensions['B'].width = 75
-    ws.column_dimensions['C'].width = 14
-    ws.column_dimensions['D'].width = 12
-    ws.column_dimensions['E'].width = 60
+    ws.column_dimensions['C'].width = 75
+    ws.column_dimensions['D'].width = 14
+    ws.column_dimensions['E'].width = 12
+    ws.column_dimensions['F'].width = 60
     
     wb.save(filename)
     return filename
@@ -354,10 +413,24 @@ def main():
     print("  P-BANDAI HK PRODUCT SCRAPER v2 (Playwright)")
     print("=" * 70 + "\n")
     
-    # Scrape Gunpla / 組裝模型 (Bandai Hobby Online Shop = shop code 05-0002)
+    # Scrape P-Bandai HK products (shop page first, search listing as top-up)
     products = scrape_pbandai()
     
     if products:
+        # Translate product names to Traditional Chinese (deep-translator)
+        print("\n🌐 Translating product names (en → zh-TW)...")
+        for i, p in enumerate(products, 1):
+            core, suffix = _split_delivery_suffix(p["name"])
+            if CJK_RE.search(core):
+                p["tc_name"] = p["name"]  # already Chinese
+            else:
+                tc = translate_name(core)
+                p["tc_name"] = (tc + suffix) if tc else p["name"]
+            if i % 10 == 0:
+                print(f"   {i}/{len(products)}")
+            time.sleep(0.4)
+        print(f"   Done ({len(products)} names)\n")
+        
         # Save files
         json_file = save_json(products)
         csv_file = save_csv(products)
@@ -376,6 +449,7 @@ def main():
         
         for i, p in enumerate(products[:5], 1):
             print(f"  {i}. {p['name'][:65]}")
+            print(f"     🀄 {p['tc_name'][:50]}")
             print(f"     💰 {p['price']}")
         
         if len(products) > 5:
