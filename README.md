@@ -8,6 +8,7 @@ A collection of standalone Python utilities for macOS.
 |------|---------|-------|--------|
 | `consolidate_model_keys.py` | Scan macOS for AI-model / API keys across shell profiles, `.env` files, and AI agent config directories; identify the provider and consuming agent for each key; export a consolidated Excel spreadsheet. | `python3 consolidate_model_keys.py [--full] [--out PATH]` | `~/Desktop/model_keys_review.xlsx` (masked by default; `--full` for raw values, file set to `chmod 600`) |
 | `parser_gmail_bill.py` | Search Gmail for credit-card transaction emails, extract card info, amounts (original / HKD), and receipt URLs; export to CSV. | `python3 parser_gmail_bill.py` | `bill.csv` (only written when at least one email contains an amount) |
+| `pbandai_scraper_v2.py` | Scrape P-Bandai HK product listings using Playwright (real browser to bypass Cloudflare). | `python3 pbandai_scraper_v2.py` | `pbandai_products_<timestamp>.json` / `.csv` / `.xlsx` |
 
 ## Details
 
@@ -35,9 +36,20 @@ Parses Gmail for credit-card transaction emails and exports a consolidated bill 
 
 **Setup**: requires `credentials.json` (OAuth client from Google Cloud Console) and `token.json` (generated on first run); both are git-ignored. On first execution a browser opens for Gmail authorization.
 
+### pbandai_scraper_v2.py
+
+Scrapes product listings from P-Bandai HK (Gunpla / assembly-model category by default) using Playwright to render the page in a real Chromium browser, avoiding Cloudflare blocks:
+
+1. **Loads** the P-Bandai search page in headless Chromium and waits for product cards to appear.
+2. **Extracts** each product's name, price, status, and item URL via in-page JavaScript.
+3. **Exports** the results as timestamped JSON, CSV, and formatted Excel files.
+
+**Setup**: `pip3 install playwright` then `python3 -m playwright install chromium`. The output files are git-ignored.
+
 ## Requirements
 
 - **Python 3.7+** (standard library only for core functionality)
 - **openpyxl** — required for Excel output (`pip install openpyxl`)
 - **google-api-python-client**, **google-auth-oauthlib** — required for Gmail parsing (`pip install google-api-python-client google-auth-oauthlib`)
+- **playwright** — required for P-Bandai scraping (`pip3 install playwright && python3 -m playwright install chromium`)
 - **PyYAML** *(optional)* — improves Hermes `config.yaml` parsing; falls back to regex if absent
