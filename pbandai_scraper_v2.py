@@ -209,8 +209,8 @@ def _valid_translation(text, original):
     return bool(CJK_RE.search(text))
 
 
-def _translate_with_backends(text):
-    """Translate via Google then MyMemory (3 attempts each); None on failure."""
+def _translate_with_backends(text, attempts=3):
+    """Translate via Google then MyMemory (`attempts` tries each); None on failure."""
     try:
         from deep_translator import GoogleTranslator, MyMemoryTranslator
     except ImportError:
@@ -226,7 +226,7 @@ def _translate_with_backends(text):
             translator = make()
         except Exception:
             continue
-        for _ in range(3):
+        for _ in range(attempts):
             try:
                 result = translator.translate(text)
                 if _valid_translation(result, text):
@@ -237,15 +237,60 @@ def _translate_with_backends(text):
     return None
 
 
+_OFFLINE_ENGINE = {"tokenizer": None, "model": None, "opencc": None}
+_OFFLINE_MODEL = "Helsinki-NLP/opus-mt-en-zh"  # downloaded once (~310 MB)
+
+
+def _offline_translate(text):
+    """Translate with a local Helsinki-NLP model (no network, no quotas).
+
+    The model is loaded once on first use; its Simplified-Chinese output is
+    converted to Traditional Chinese via opencc when available. Returns
+    None when the packages or model are not installed.
+    """
+    engine = _OFFLINE_ENGINE
+    if engine["model"] is None:
+        try:
+            from transformers import MarianMTModel, MarianTokenizer
+            engine["tokenizer"] = MarianTokenizer.from_pretrained(_OFFLINE_MODEL)
+            engine["model"] = MarianMTModel.from_pretrained(_OFFLINE_MODEL)
+        except Exception:
+            return None
+        try:
+            from opencc import OpenCC
+            engine["opencc"] = OpenCC("s2twp")
+        except Exception:
+            engine["opencc"] = None
+    try:
+        batch = engine["tokenizer"]([text], return_tensors="pt", padding=True)
+        out = engine["model"].generate(**batch, max_new_tokens=128)
+        result = engine["tokenizer"].batch_decode(out, skip_special_tokens=True)[0]
+        result = re.sub(r"(?<=\d)\s*/\s*(?=\d)", "/", result)
+        if engine["opencc"] is not None:
+            result = engine["opencc"].convert(result)
+        return result if CJK_RE.search(result) else None
+    except Exception:
+        return None
+
+
 def translate_name(name):
     """Translate an English product name to Traditional Chinese.
 
-    Translation services refuse some trademark strings (e.g. "S.H.Figuarts")
-    and echo the input back unchanged. Besides retrying, progressively
-    simpler variants are tried — dropping leading dotted brand tokens and
-    bracketed qualifiers — and the untouched prefixes are prepended to the
-    result. Returns None when everything fails or the library is missing.
+    Strategy, most to least preferred:
+      1. free online Google/MyMemory backends (best quality)
+      2. a local Helsinki-NLP model — free services throttle bursts of
+         requests, so an offline engine guarantees a result
+      3. progressively simpler online variants of the name (some trademark
+         strings such as "S.H.Figuarts" are refused and echoed back), with
+         the untouched prefixes prepended to the result
+    Returns None only when every engine fails.
     """
+    result = _translate_with_backends(name, attempts=2)
+    if result:
+        return result
+    result = _offline_translate(name)
+    if result:
+        return result
     seen = set()
     worklist = [(name, "")]
     while worklist:
@@ -253,9 +298,10 @@ def translate_name(name):
         if text in seen:
             continue
         seen.add(text)
-        result = _translate_with_backends(text)
-        if result:
-            return prefix + result
+        if text != name:
+            result = _translate_with_backends(text, attempts=1)
+            if result:
+                return prefix + result
         for m in (re.match(r"^(?:(?:[A-Z0-9]+\.)+[A-Za-z0-9]*)\s*(.*)$", text),
                   re.match(r"^\s*(\([^)]*\))\s*(.*)$", text)):
             if m and m.group(1) and m.group(1) != text:

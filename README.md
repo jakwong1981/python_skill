@@ -42,10 +42,10 @@ Scrapes product listings from P-Bandai HK (Gunpla / assembly-model category by d
 
 1. **Loads** the P-Bandai shop page first (statically served, reliable), then tops up with the bot-protected category search page (gunpla, `_f_categories=04-004`) when it is reachable.
 2. **Extracts** each product's name, price, status, and item URL via in-page JavaScript.
-3. **Translates** each product name from English to Traditional Chinese into a `TC Product Name` field (falls back to the English name when unavailable).
+3. **Translates** each product name from English to Traditional Chinese into a `TC Product Name` field. Translation tries free online services (Google/MyMemory) first, then a local Helsinki-NLP model — free endpoints throttle bursts of requests, so the offline engine guarantees a result; the English name is kept only when every engine is unavailable.
 4. **Exports** the results as fixed-name `pbandai_products.csv`, `.json`, and `.xlsx` files (overwritten on each run).
 
-**Setup**: `pip3 install playwright deep-translator` then `python3 -m playwright install chromium`. The output files are git-ignored.
+**Setup**: `pip3 install playwright deep-translator` then `python3 -m playwright install chromium`. For the guaranteed offline translation fallback also run `pip3 install torch transformers sentencepiece opencc-python-reimplemented` (downloads the ~310 MB Helsinki-NLP model on first use). The output files are git-ignored.
 
 **Tunable constants** (top of the script): `SEARCH_ATTEMPTS` (search top-up tries after the shop page, default 1), `SEARCH_RETRY_WAIT_S` (pause between tries), and `HEADLESS` (set to `False` to watch the browser run).
 
@@ -55,5 +55,6 @@ Scrapes product listings from P-Bandai HK (Gunpla / assembly-model category by d
 - **openpyxl** — required for Excel output (`pip install openpyxl`)
 - **google-api-python-client**, **google-auth-oauthlib** — required for Gmail parsing (`pip install google-api-python-client google-auth-oauthlib`)
 - **playwright** — required for P-Bandai scraping (`pip3 install playwright && python3 -m playwright install chromium`)
-- **deep-translator** — required for P-Bandai product-name translation to Traditional Chinese (`pip3 install deep-translator`)
+- **deep-translator** — free online translation backends (Google/MyMemory) for P-Bandai product names (`pip3 install deep-translator`)
+- **transformers**, **torch**, **sentencepiece**, **opencc-python-reimplemented** *(optional but recommended)* — offline Helsinki-NLP translation fallback so names are translated even when the free online endpoints throttle requests (`pip3 install torch transformers sentencepiece opencc-python-reimplemented`; the model downloads once on first use)
 - **PyYAML** *(optional)* — improves Hermes `config.yaml` parsing; falls back to regex if absent
