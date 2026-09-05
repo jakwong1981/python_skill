@@ -195,17 +195,25 @@ def _split_delivery_suffix(name):
 def translate_name(name):
     """Translate an English product name to Traditional Chinese.
 
-    Uses deep-translator's free Google backend; returns None when the
-    library is not installed or the service fails.
+    Tries deep-translator's free Google backend (3 attempts), then falls
+    back to the free MyMemory backend. Returns None when everything fails
+    or the library is not installed.
     """
     try:
-        from deep_translator import GoogleTranslator
+        from deep_translator import GoogleTranslator, MyMemoryTranslator
     except ImportError:
         return None
-    try:
-        return GoogleTranslator(source="en", target="zh-TW").translate(name)
-    except Exception:
-        return None
+    for make in (
+        lambda: GoogleTranslator(source="en", target="zh-TW"),
+        lambda: MyMemoryTranslator(source="en-GB", target="zh-TW"),
+    ):
+        translator = make()
+        for _ in range(3):
+            try:
+                return translator.translate(name)
+            except Exception:
+                time.sleep(1.5)
+    return None
 
 
 def scrape_pbandai(search_url=SEARCH_URL, shop_url=SHOP_URL):
@@ -419,17 +427,22 @@ def main():
     if products:
         # Translate product names to Traditional Chinese (deep-translator)
         print("\n🌐 Translating product names (en → zh-TW)...")
+        failures = 0
         for i, p in enumerate(products, 1):
             core, suffix = _split_delivery_suffix(p["name"])
             if CJK_RE.search(core):
                 p["tc_name"] = p["name"]  # already Chinese
             else:
                 tc = translate_name(core)
-                p["tc_name"] = (tc + suffix) if tc else p["name"]
+                if tc:
+                    p["tc_name"] = tc + suffix
+                else:
+                    p["tc_name"] = p["name"]
+                    failures += 1
             if i % 10 == 0:
                 print(f"   {i}/{len(products)}")
             time.sleep(0.4)
-        print(f"   Done ({len(products)} names)\n")
+        print(f"   Done ({len(products)} names, {failures} untranslated)\n")
         
         # Save files
         json_file = save_json(products)
