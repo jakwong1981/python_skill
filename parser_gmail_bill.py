@@ -58,8 +58,9 @@ def parse_card_info(text):
     card_patterns = [
         r"(Visa[\s\-\•\*\.]*(?:\d{4}|[xX]{1,4}\-?\d{4}))",
         r"(Mastercard[\s\-\•\*\.]*(?:\d{4}|[xX]{1,4}\-?\d{4}))",
-        r"(Credit\s*Card[\s\w\(\)]*)",
-        r"(信用卡[\s\w\(\)]*)",
+        r"(Credit\s*Card[\s\w\(\)]*(?:Visa|Mastercard|MasterCard|AMEX|American\s*Express|銀聯|UnionPay)\)?)",
+        r"(信用卡[\s\w\(\)]*(?:Visa|Mastercard|MasterCard|AMEX|American\s*Express|銀聯|UnionPay|VISA)\)?)",
+        r"(信用卡[\s\w\(\)]{0,20}\d{4})",
         r"(末四碼[\s\:\：]*\d{4})",
         r"(-\s*7737|\b7737\b)",
         r"(VISA\s*X\-7737)"
@@ -73,19 +74,57 @@ def parse_card_info(text):
 def parse_amount(text):
     """
     從郵件中擷取金額及貨幣單位。
+
+    支援千位逗號（HK$1,234.56）、貨幣前置或後置（$17.33 HKD、10.80 USD）、
+    中英文幣別（HKD/USD/港幣/港元/美元），以及純 $ 符號（依上下文判定幣別）。
     """
-    matches = re.findall(r"(HKD|\$|HK\$|USD|US\$)\s*([0-9]+(?:\.[0-9]{2})?)", text, re.IGNORECASE)
+    number = r"(?<![\d.])(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{2})?(?![\d])"
+    pairs = []  # (currency, value) 依出現順序
+
+    def is_hkd(curr):
+        return curr in ("HKD", "HK$", "港幣", "港元")
+
+    def is_usd(curr):
+        return curr in ("USD", "US$", "美元")
+
+    def display_curr(curr):
+        if is_hkd(curr):
+            return "HK$"
+        if is_usd(curr):
+            return "US$"
+        return curr
+
+    # 明確幣別：前綴或後綴皆可（排除「1 USD = 8.1542 HKD」之類的匯率行）
+    for m in re.finditer(
+        rf"(HKD|HK\$|USD|US\$|港幣|港元|美元)\s*({number})"
+        rf"|({number})\s*(HKD|HK\$|USD|US\$|港幣|港元|美元)(?!\s*=)",
+        text, re.IGNORECASE):
+        if m.group(1):
+            pairs.append((m.group(1).upper(), m.group(2).replace(",", "")))
+        else:
+            pairs.append((m.group(4).upper(), m.group(3).replace(",", "")))
+
+    # 純 $ 符號：後綴標明幣別時跟隨後綴；否則歸入同信已知幣別，均無則預設美元
+    for m in re.finditer(rf"(?<![A-Za-z])\$\s*({number})(?!\s*=)", text):
+        val = m.group(1).replace(",", "")
+        after = text[m.end():m.end() + 8]
+        if re.match(r"^\s*(HKD|港幣|港元)\b", after, re.IGNORECASE):
+            pairs.append(("HKD", val))
+        elif pairs:
+            pairs.append((pairs[0][0], val))
+        else:
+            pairs.append(("USD", val))
+
     orig_amount = ""
     hkd_amount = ""
-    
-    for curr, val in matches:
-        amt_str = f"{curr.upper()} {val}"
-        if "HK" in curr.upper():
+    for curr, val in pairs:
+        amt_str = f"{display_curr(curr)} {val}"
+        if is_hkd(curr):
             if not hkd_amount:
                 hkd_amount = val
             if not orig_amount:
                 orig_amount = amt_str
-        elif "USD" in curr.upper() or "US" in curr.upper():
+        elif is_usd(curr):
             if not orig_amount:
                 orig_amount = amt_str
 

@@ -183,6 +183,10 @@ def _load_page(browser, url, attempts=5):
 
 CJK_RE = re.compile(r"[\u3000-\u9fff]")
 
+# Optional: MyMemory raises its free daily quota from ~5k to 50k chars/day
+# when you pass an email address.
+MYMEMORY_EMAIL = ""
+
 
 def _split_delivery_suffix(name):
     """Split a trailing bracketed delivery note (e.g. '[2026年11月發送]') off a name."""
@@ -192,27 +196,70 @@ def _split_delivery_suffix(name):
     return name, ""
 
 
-def translate_name(name):
-    """Translate an English product name to Traditional Chinese.
+def _valid_translation(text, original):
+    """A translation must differ from the input and contain Chinese.
 
-    Tries deep-translator's free Google backend (3 attempts), then falls
-    back to the free MyMemory backend. Returns None when everything fails
-    or the library is not installed.
+    Translation services silently echo the input back when their daily
+    quota is exhausted; such results must not count as translations.
     """
+    if not text:
+        return False
+    if text.strip().lower() == original.strip().lower():
+        return False
+    return bool(CJK_RE.search(text))
+
+
+def _translate_with_backends(text):
+    """Translate via Google then MyMemory (3 attempts each); None on failure."""
     try:
         from deep_translator import GoogleTranslator, MyMemoryTranslator
     except ImportError:
         return None
-    for make in (
+    backends = [
         lambda: GoogleTranslator(source="en", target="zh-TW"),
-        lambda: MyMemoryTranslator(source="en-GB", target="zh-TW"),
-    ):
-        translator = make()
+        lambda: MyMemoryTranslator(
+            source="en-GB", target="zh-TW", email=MYMEMORY_EMAIL or None
+        ),
+    ]
+    for make in backends:
+        try:
+            translator = make()
+        except Exception:
+            continue
         for _ in range(3):
             try:
-                return translator.translate(name)
+                result = translator.translate(text)
+                if _valid_translation(result, text):
+                    return result
             except Exception:
-                time.sleep(1.5)
+                pass
+            time.sleep(1.5)
+    return None
+
+
+def translate_name(name):
+    """Translate an English product name to Traditional Chinese.
+
+    Translation services refuse some trademark strings (e.g. "S.H.Figuarts")
+    and echo the input back unchanged. Besides retrying, progressively
+    simpler variants are tried — dropping leading dotted brand tokens and
+    bracketed qualifiers — and the untouched prefixes are prepended to the
+    result. Returns None when everything fails or the library is missing.
+    """
+    seen = set()
+    worklist = [(name, "")]
+    while worklist:
+        text, prefix = worklist.pop(0)
+        if text in seen:
+            continue
+        seen.add(text)
+        result = _translate_with_backends(text)
+        if result:
+            return prefix + result
+        for m in (re.match(r"^(?:(?:[A-Z0-9]+\.)+[A-Za-z0-9]*)\s*(.*)$", text),
+                  re.match(r"^\s*(\([^)]*\))\s*(.*)$", text)):
+            if m and m.group(1) and m.group(1) != text:
+                worklist.append((m.group(1), prefix + text[: m.start(1)]))
     return None
 
 
@@ -428,6 +475,7 @@ def main():
         # Translate product names to Traditional Chinese (deep-translator)
         print("\n🌐 Translating product names (en → zh-TW)...")
         failures = 0
+        failed_idx = []
         for i, p in enumerate(products, 1):
             core, suffix = _split_delivery_suffix(p["name"])
             if CJK_RE.search(core):
@@ -439,9 +487,20 @@ def main():
                 else:
                     p["tc_name"] = p["name"]
                     failures += 1
+                    failed_idx.append(i - 1)
             if i % 10 == 0:
                 print(f"   {i}/{len(products)}")
             time.sleep(0.4)
+
+        # Second pass: retry names that failed (transient rate limits)
+        for idx in failed_idx:
+            core, suffix = _split_delivery_suffix(products[idx]["name"])
+            tc = translate_name(core)
+            if tc:
+                products[idx]["tc_name"] = tc + suffix
+                failures -= 1
+            time.sleep(3)
+
         print(f"   Done ({len(products)} names, {failures} untranslated)\n")
         
         # Save files
