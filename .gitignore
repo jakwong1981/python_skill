@@ -2,9 +2,13 @@
 credentials.json
 token.json
 
+# 所有 JSON / CSV 檔案皆不提交
+*.json
+*.csv
+
 # 程式產生之輸出
-bill.csv
 model_keys_review.xlsx
+pbandai_products_*.xlsx
 
 # macOS
 .DS_Store
