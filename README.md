@@ -9,6 +9,7 @@ A collection of standalone Python utilities for macOS.
 | `consolidate_model_keys.py` | Scan macOS for AI-model / API keys across shell profiles, `.env` files, and AI agent config directories; identify the provider and consuming agent for each key; export a consolidated Excel spreadsheet. | `python3 consolidate_model_keys.py [--full] [--out PATH]` | `~/Desktop/model_keys_review.xlsx` (masked by default; `--full` for raw values, file set to `chmod 600`) |
 | `parser_gmail_bill.py` | Search Gmail for credit-card transaction emails, extract card info, amounts (original / HKD), and receipt URLs; export to CSV. | `python3 parser_gmail_bill.py` | `bill.csv` (only written when at least one email contains an amount) |
 | `pbandai_scraper_v2.py` | Scrape P-Bandai HK product listings using Playwright (real browser to bypass Cloudflare); translates product names to Traditional Chinese. | `python3 pbandai_scraper_v2.py` | `pbandai_products.csv` / `.json` / `.xlsx` (fixed names, include a `TC Product Name` field) |
+| `hobbyland_scraper.py` | Scrape the Hobbyland E-shop Gunpla catalog (HG / MG / RG): reads the total page count per category from the shop's JSON API, loops every `?page=x`, and collects each item's title, price, and detail-page link. | `python3 hobbyland_scraper.py [hg] [mg] [rg]` (no args = all) | `hobbyland_hg.csv` / `hobbyland_mg.csv` / `hobbyland_rg.csv` (fixed names; stdlib only, no browser) |
 
 ## Details
 
@@ -48,6 +49,19 @@ Scrapes product listings from P-Bandai HK (Gunpla / assembly-model category by d
 **Setup**: `pip3 install playwright deep-translator` then `python3 -m playwright install chromium`. For the guaranteed offline translation fallback also run `pip3 install torch transformers sentencepiece opencc-python-reimplemented` (downloads the ~310 MB Helsinki-NLP model on first use). The output files are git-ignored.
 
 **Tunable constants** (top of the script): `SEARCH_ATTEMPTS` (search top-up tries after the shop page, default 1), `SEARCH_RETRY_WAIT_S` (pause between tries), and `HEADLESS` (set to `False` to watch the browser run).
+
+### hobbyland_scraper.py
+
+Scrapes the Hobbyland E-shop Gunpla categories — HG High Grade (`hg_high_grade`), MG Master Grade (`mg_master_grade`), and RG Real Grade (`rg_real_grade`), all under `model_area > gundam_zone`:
+
+1. **Discovers the max page count** per category from page 1's response (`total_pages` — the same number as the last button in the pagination bar at the bottom of the category page).
+2. **Loops every page** `1..max` by posting to the shop's JSON API (`POST backend.hobbylandeshop.com/api/products` with `{"page": x, "category": [...], "stockStatus": "in_stock"}`) — the site is a Vue SPA, so category URLs return only an empty HTML shell; the frontend itself maps `?page=x` to this API call.
+3. **Extracts** each item's title (description), price and regular price, SKU, stock, availability (`sell_type`), and detail-page hyperlink.
+4. **Exports** one isolated CSV per category (`hobbyland_hg.csv` / `hobbyland_mg.csv` / `hobbyland_rg.csv`, UTF-8 BOM, overwritten on each run), with the required `title`, `price`, `url` fields followed by the helper columns.
+
+Run `python3 hobbyland_scraper.py` for all categories, or pass a subset, e.g. `python3 hobbyland_scraper.py hg rg`.
+
+**Setup**: none — Python 3 standard library only, no browser or extra packages. The API is not bot-protected, so plain HTTPS requests suffice.
 
 ## Requirements
 
