@@ -183,12 +183,22 @@ class TestMessageLayout(unittest.TestCase):
     def test_bilingual_message_drops_chinese_block_when_over_budget(self):
         selected, now = self._selected()
         full = digest.build_message(selected, {"HG": 2}, 2, now,
-                                    budget=digest.EXPRESS_DEFAULT_BUDGET)
+                                    budget=digest.EXPRESS_DEFAULT_BUDGET,
+                                    bubble=10_000)
         squeezed = digest.build_message(selected, {"HG": 2}, 2, now, budget=400)
         self.assertIn("高達模型價格監察", full)
         self.assertNotIn("高達模型價格監察", squeezed)
         self.assertIn("Chinese block omitted", squeezed)
         self.assertIn("GUNPLA PRICE WATCH", squeezed)
+
+    def test_character_ceiling_also_keeps_it_to_one_bubble(self):
+        """A generous body budget is not enough — the bubble ceiling must hold too."""
+        selected, now = self._selected()
+        message = digest.build_message(selected, {"HG": 2}, 2, now,
+                                       budget=digest.EXPRESS_DEFAULT_BUDGET, bubble=600)
+        self.assertNotIn("高達模型價格監察", message)
+        self.assertIn("Chinese block omitted", message)
+        self.assertLessEqual(len(message), 600)
 
     def test_alt_shop_price_is_shown_only_when_matched(self):
         rows = [row(digest.SHOP_AP, "RG", "RG 025 1/144 獨角獸高達", 258.0, "4573102616098", 1),
@@ -200,10 +210,12 @@ class TestMessageLayout(unittest.TestCase):
         self.assertIn("HK$198", message)
         self.assertIn("animes-pro HK$258", message)
 
-    def test_real_message_stays_inside_the_bridge_budget(self):
+    def test_real_message_fits_one_whatsapp_bubble_and_the_bridge(self):
         selected, now = self._selected()
         message = digest.build_message(selected, {"HG": 2}, 2, now)
         self.assertLess(digest.payload_bytes(message), digest.bridge_body_budget())
+        self.assertLessEqual(len(message), digest.whatsapp_bubble_limit())
+        self.assertGreater(digest.whatsapp_bubble_limit(), 4096)   # not the legacy cap
 
 
 if __name__ == "__main__":
