@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Hobbyland E-shop — Gunpla catalog scraper (HG / MG / RG)
+Hobbyland E-shop / animes-pro.com — Gunpla catalog scraper (HG / MG / RG / animes-pro HG)
 
-The shop frontend is a Vue single-page app: opening a category page such as
+The hobbylandeshop.com frontend is a Vue single-page app: opening a category page such as
 
     https://www.hobbylandeshop.com/product-category/model_area/gundam_zone/hg_high_grade?page=2
 
@@ -21,14 +21,23 @@ category:
   3. every item's title (description), price, and detail-page hyperlink
      (plus SKU / stock / availability) is collected.
 
+For animes-pro.com (Shopify-based) the scraper uses the standard Shopify
+/products.json endpoint instead:
+
+    GET https://animes-pro.com/collections/{handle}/products.json?page={n}
+
+Iteration continues until the products array is empty.
+
 Each category is written to its own CSV:
-  hg -> hobbyland_hg.csv   (model_area > gundam_zone > hg_high_grade)
-  mg -> hobbyland_mg.csv   (model_area > gundam_zone > mg_master_grade)
-  rg -> hobbyland_rg.csv   (model_area > gundam_zone > rg_real_grade)
+  hg    -> hobbyland_hg.csv   (model_area > gundam_zone > hg_high_grade)
+  mg    -> hobbyland_mg.csv   (model_area > gundam_zone > mg_master_grade)
+  rg    -> hobbyland_rg.csv   (model_area > gundam_zone > rg_real_grade)
+  ap_hg -> animes-pro_hg.csv  (animes-pro.com Shopify collection)
 
 Usage:
   python3 hobbyland_scraper.py           # scrape all categories
   python3 hobbyland_scraper.py hg rg     # scrape selected categories only
+  python3 hobbyland_scraper.py ap_hg     # scrape animes-pro HG only
 """
 
 import csv
@@ -42,6 +51,7 @@ import urllib.request
 # --- Site URLs ---
 BASE_URL = "https://www.hobbylandeshop.com"
 API_URL = "https://backend.hobbylandeshop.com/api/products"
+ANIME_PRO_BASE_URL = "https://animes-pro.com"
 
 # category key -> (output CSV, path segments under /product-category/)
 CATEGORIES = {
@@ -51,6 +61,11 @@ CATEGORIES = {
            ["model_area", "gundam_zone", "mg_master_grade"]),
     "rg": ("hobbyland_rg.csv",
            ["model_area", "gundam_zone", "rg_real_grade"]),
+}
+
+# animes-pro.com (Shopify) categories: key -> (output CSV, collection handle)
+ANIME_PRO_CATEGORIES = {
+    "ap_hg": ("animes-pro_hg.csv", "high-grade-hg%E6%A8%A1%E5%9E%8B"),
 }
 
 STOCK_STATUS = "in_stock"   # matches the shop's default listing tab
@@ -165,6 +180,78 @@ def scrape_category(segments, max_pages=None):
     return products
 
 
+def _fetch_animes_pro_page(collection_handle, page):
+    """GET /collections/{handle}/products.json?page={page}; returns product list."""
+    url = (f"{ANIME_PRO_BASE_URL}/collections/{collection_handle}"
+           f"/products.json?page={page}")
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(request, timeout=30) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return data.get("products", [])
+
+
+def fetch_animes_pro_page_with_retry(collection_handle, page):
+    """Fetch one animes-pro page, retrying transient failures."""
+    for attempt in range(1, PAGE_ATTEMPTS + 1):
+        try:
+            return _fetch_animes_pro_page(collection_handle, page)
+        except (urllib.error.URLError, TimeoutError,
+                json.JSONDecodeError) as exc:
+            if attempt == PAGE_ATTEMPTS:
+                raise
+            print(f"   ⚠️  Page {page} failed (attempt {attempt}/"
+                  f"{PAGE_ATTEMPTS}): {exc}")
+            time.sleep(RETRY_WAIT_S)
+    return None  # unreachable
+
+
+def scrape_animes_pro_category(collection_handle):
+    """Scrape all pages from an animes-pro.com Shopify collection.
+
+    Shopify's /products.json endpoint returns an empty array when there are
+    no more pages, so we iterate until we hit an empty page.
+    """
+    products = []
+    seen_urls = set()
+    page = 1
+
+    while True:
+        batch = fetch_animes_pro_page_with_retry(collection_handle, page)
+        if not batch:
+            print(f"   — page {page}: empty, collection exhausted")
+            break
+
+        added = 0
+        for item in batch:
+            handle = item.get("handle", "")
+            url = f"{ANIME_PRO_BASE_URL}/products/{handle}"
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+            variants = item.get("variants", [])
+            price = variants[0].get("price", "") if variants else ""
+            products.append({
+                "title": item.get("title", "").strip(),
+                "price": price,
+                "url": url,
+                "regular_price": "",
+                "sku": "",
+                "stock": "",
+                "sell_type": "",
+            })
+            added += 1
+
+        print(f"   Page {page}: {len(batch)} items (+{added} new)")
+        page += 1
+        time.sleep(PAGE_WAIT_S)
+
+        if page > 200:  # safety guard
+            print("   ⚠️  Safety limit of 200 pages reached — stopping")
+            break
+
+    return products
+
+
 def save_csv(products, filename):
     """Save one category to CSV (fixed filename, overwritten on each run)."""
     with open(filename, "w", newline="", encoding="utf-8-sig") as f:
@@ -176,30 +263,47 @@ def save_csv(products, filename):
 
 def main(argv):
     print("=" * 70)
-    print("  HOBBYLAND E-SHOP — GUNPLA CATALOG SCRAPER (HG / MG / RG)")
+    print("  HOBBYLAND / ANIMES-PRO — GUNPLA CATALOG SCRAPER")
     print("=" * 70 + "\n")
+
+    # Merge both category dicts for CLI lookup
+    all_cats = {**CATEGORIES, **ANIME_PRO_CATEGORIES}
 
     # Optional argv selects categories; default = all
     keys = [arg.lower() for arg in argv]
-    unknown = [k for k in keys if k not in CATEGORIES]
+    unknown = [k for k in keys if k not in all_cats]
     if unknown:
         print(f"❌ Unknown category: {', '.join(unknown)}")
-        print(f"   Available: {', '.join(CATEGORIES)}")
+        print(f"   Available: {', '.join(all_cats)}")
         return 2
     if not keys:
-        keys = list(CATEGORIES)
+        keys = list(all_cats)
 
     exit_code = 0
     for key in keys:
-        csv_name, segments = CATEGORIES[key]
         label = key.upper()
-        print(f"🔗 [{label}] Category: {_category_url(segments)}\n")
-        try:
-            products = scrape_category(segments)
-        except Exception as exc:
-            print(f"\n❌ [{label}] Scraping failed: {exc}\n")
-            exit_code = 1
-            continue
+
+        if key in ANIME_PRO_CATEGORIES:
+            # --- animes-pro.com (Shopify) branch ---
+            csv_name, handle = ANIME_PRO_CATEGORIES[key]
+            print(f"🔗 [{label}] Collection: "
+                  f"{ANIME_PRO_BASE_URL}/collections/{handle}\n")
+            try:
+                products = scrape_animes_pro_category(handle)
+            except Exception as exc:
+                print(f"\n❌ [{label}] Scraping failed: {exc}\n")
+                exit_code = 1
+                continue
+        else:
+            # --- Hobbyland (Vue SPA API) branch ---
+            csv_name, segments = CATEGORIES[key]
+            print(f"🔗 [{label}] Category: {_category_url(segments)}\n")
+            try:
+                products = scrape_category(segments)
+            except Exception as exc:
+                print(f"\n❌ [{label}] Scraping failed: {exc}\n")
+                exit_code = 1
+                continue
 
         if not products:
             print(f"❌ [{label}] No products found — CSV not written.\n")
