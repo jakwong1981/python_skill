@@ -8,6 +8,12 @@ Updated 2026-09: the scraper queries the category-based search listing
 search endpoint is unavailable — its bot protection intermittently returns
 "PAGE NOT AVAILABLE", so listings are loaded with retries.
 
+Performance tuning (2026-09): product names are translated on a small
+worker pool (TRANSLATE_WORKERS) with a circuit breaker that switches to
+the offline model once the free online backends start throttling; listing
+waits wake as soon as the first card renders; retry and wait budgets are
+bounded so a bot-blocked page cannot stall the run for minutes.
+
 Installation:
   pip3 install playwright
   python3 -m playwright install chromium
@@ -20,7 +26,9 @@ import json
 import csv
 import os
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 # --- Site URLs (category-based search; the search endpoint's bot protection
 # intermittently returns "PAGE NOT AVAILABLE") ---
@@ -31,6 +39,11 @@ SHOP_URL = "https://p-bandai.com/hk/shop/hobbyonlineshop"
 # --- Retry settings for the protected search endpoint ---
 SEARCH_ATTEMPTS = 1           # top-up tries after the shop page (raise for more)
 SEARCH_RETRY_WAIT_S = 10      # seconds to wait between search attempts
+PAGE_LOAD_ATTEMPTS = 3        # attempts per pagination page in _load_page
+
+# --- Translation tuning ---
+TRANSLATE_WORKERS = 4         # names translated concurrently (1 = sequential)
+ONLINE_FAIL_STREAK_LIMIT = 4  # consecutive online misses before offline-first
 USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 MAX_PAGES = 10
@@ -66,18 +79,27 @@ def _new_context(browser):
     )
 
 
-def _wait_for_listing(page, timeout_s=1000, error_grace_s=10):
-    """Poll until product cards appear or the site's error page shows up.
+def _wait_for_listing(page, timeout_s=90, error_grace_s=10):
+    """Wait until product cards appear or the site's error page shows up.
 
-    The "PAGE NOT AVAILABLE" page is the bot-protection challenge. It
-    sometimes auto-resolves after a few seconds and redirects to the real
-    listing, so keep watching for `error_grace_s` before giving up.
+    Wakes as soon as the first card is attached (event-driven selector
+    wait) instead of re-checking on a fixed 1-second clock. The "PAGE NOT
+    AVAILABLE" page is the bot-protection challenge: it sometimes
+    auto-resolves after a few seconds and redirects to the real listing,
+    so keep watching for `error_grace_s` before giving up. The overall
+    `timeout_s` bounds the worst case — a page that shows neither cards
+    nor the challenge cannot stall the run for minutes.
     """
     deadline = time.time() + timeout_s
     error_seen_at = None
     while time.time() < deadline:
-        if page.locator('a[href*="/hk/item/"]').count() > 0:
+        try:
+            page.wait_for_selector('a[href*="/hk/item/"]',
+                                   state="attached", timeout=500)
             return True
+        except Exception:
+            if page.is_closed():
+                raise
         try:
             if "PAGE NOT AVAILABLE" in page.title():
                 if error_seen_at is None:
@@ -86,7 +108,6 @@ def _wait_for_listing(page, timeout_s=1000, error_grace_s=10):
                     return False
         except Exception:
             pass
-        page.wait_for_timeout(1000)
     return False
 
 
@@ -132,7 +153,7 @@ TOTAL_JS = """() => {
 }"""
 
 
-def _extract_stable(page, stable_s=3, max_wait_s=500):
+def _extract_stable(page, stable_s=2, max_wait_s=500):
     """Extract cards, waiting until the lazy-loaded card count stops growing.
 
     The listing renders a first batch of cards and may reveal more later
@@ -155,7 +176,7 @@ def _extract_stable(page, stable_s=3, max_wait_s=500):
     return _extract_products(page)
 
 
-def _load_page(browser, url, attempts=5):
+def _load_page(browser, url, attempts=PAGE_LOAD_ATTEMPTS):
     """Load `url` in a fresh context, retrying while the search endpoint is flaky."""
     for attempt in range(1, attempts + 1):
         context = _new_context(browser)
@@ -168,7 +189,7 @@ def _load_page(browser, url, attempts=5):
             try:
                 # The challenge may have set a cookie — retry in the SAME
                 # context before discarding it
-                page.reload(wait_until="domcontentloaded", timeout=300)
+                page.reload(wait_until="domcontentloaded", timeout=15000)
                 if _wait_for_listing(page):
                     return page
             except Exception:
@@ -186,6 +207,30 @@ CJK_RE = re.compile(r"[\u3000-\u9fff]")
 # Optional: MyMemory raises its free daily quota from ~5k to 50k chars/day
 # when you pass an email address.
 MYMEMORY_EMAIL = ""
+
+# Translation memo + online-backend health state. One lock guards both;
+# the translation wave runs on a worker pool, so updates must be atomic.
+_TRANSLATION_CACHE = {}        # name -> successful translation only
+_STATE_LOCK = threading.Lock()
+_ONLINE_STATE = {"streak": 0, "degraded": False}
+
+
+def _note_online_success():
+    with _STATE_LOCK:
+        _ONLINE_STATE["streak"] = 0
+        _ONLINE_STATE["degraded"] = False
+
+
+def _note_online_failure():
+    with _STATE_LOCK:
+        _ONLINE_STATE["streak"] += 1
+        if _ONLINE_STATE["streak"] >= ONLINE_FAIL_STREAK_LIMIT:
+            _ONLINE_STATE["degraded"] = True
+
+
+def _online_is_degraded():
+    with _STATE_LOCK:
+        return _ONLINE_STATE["degraded"]
 
 
 def _split_delivery_suffix(name):
@@ -239,6 +284,7 @@ def _translate_with_backends(text, attempts=3):
 
 _OFFLINE_ENGINE = {"tokenizer": None, "model": None, "opencc": None}
 _OFFLINE_MODEL = "Helsinki-NLP/opus-mt-en-zh"  # downloaded once (~310 MB)
+_OFFLINE_INIT_LOCK = threading.Lock()          # first load only (pool-safe)
 
 
 def _offline_translate(text):
@@ -250,17 +296,19 @@ def _offline_translate(text):
     """
     engine = _OFFLINE_ENGINE
     if engine["model"] is None:
-        try:
-            from transformers import MarianMTModel, MarianTokenizer
-            engine["tokenizer"] = MarianTokenizer.from_pretrained(_OFFLINE_MODEL)
-            engine["model"] = MarianMTModel.from_pretrained(_OFFLINE_MODEL)
-        except Exception:
-            return None
-        try:
-            from opencc import OpenCC
-            engine["opencc"] = OpenCC("s2twp")
-        except Exception:
-            engine["opencc"] = None
+        with _OFFLINE_INIT_LOCK:
+            if engine["model"] is None:
+                try:
+                    from transformers import MarianMTModel, MarianTokenizer
+                    engine["tokenizer"] = MarianTokenizer.from_pretrained(_OFFLINE_MODEL)
+                    engine["model"] = MarianMTModel.from_pretrained(_OFFLINE_MODEL)
+                except Exception:
+                    return None
+                try:
+                    from opencc import OpenCC
+                    engine["opencc"] = OpenCC("s2twp")
+                except Exception:
+                    engine["opencc"] = None
     try:
         batch = engine["tokenizer"]([text], return_tensors="pt", padding=True)
         out = engine["model"].generate(**batch, max_new_tokens=128)
@@ -284,13 +332,45 @@ def translate_name(name):
          strings such as "S.H.Figuarts" are refused and echoed back), with
          the untouched prefixes prepended to the result
     Returns None only when every engine fails.
+
+    Successful results are memoized, and once the online backends miss
+    several names in a row (rate limiting) the offline model is tried
+    first — retrying throttled services only burns seconds per name.
     """
-    result = _translate_with_backends(name, attempts=2)
+    with _STATE_LOCK:
+        if name in _TRANSLATION_CACHE:
+            return _TRANSLATION_CACHE[name]
+
+    if _online_is_degraded():
+        result = _offline_translate(name)
+        if not result:
+            result = _translate_with_backends(name, attempts=1)
+            if result:
+                _note_online_success()
+    else:
+        result = _translate_with_backends(name, attempts=2)
+        if result:
+            _note_online_success()
+        else:
+            _note_online_failure()
+            result = _offline_translate(name)
+
+    if not result:
+        result = _translate_name_variants(name)
+
     if result:
-        return result
-    result = _offline_translate(name)
-    if result:
-        return result
+        with _STATE_LOCK:
+            _TRANSLATION_CACHE[name] = result
+    return result
+
+
+def _translate_name_variants(name):
+    """Retry a refused name with progressively simpler online variants.
+
+    Some trademark strings (e.g. "S.H.Figuarts") get echoed back by the
+    free backends; stripping prefixes/parenthesised parts and translating
+    the rest often succeeds, with the untouched prefix prepended.
+    """
     seen = set()
     worklist = [(name, "")]
     while worklist:
@@ -301,12 +381,59 @@ def translate_name(name):
         if text != name:
             result = _translate_with_backends(text, attempts=1)
             if result:
+                _note_online_success()
                 return prefix + result
         for m in (re.match(r"^(?:(?:[A-Z0-9]+\.)+[A-Za-z0-9]*)\s*(.*)$", text),
                   re.match(r"^\s*(\([^)]*\))\s*(.*)$", text)):
             if m and m.group(1) and m.group(1) != text:
                 worklist.append((m.group(1), prefix + text[: m.start(1)]))
     return None
+
+
+def _translate_one(indexed_product):
+    """Translate one (index, product); returns (index, tc_name, ok)."""
+    index, product = indexed_product
+    core, suffix = _split_delivery_suffix(product["name"])
+    if CJK_RE.search(core):
+        return index, product["name"], True  # already Chinese
+    tc = translate_name(core)
+    if tc:
+        return index, tc + suffix, True
+    return index, product["name"], False
+
+
+def _translate_products(products):
+    """Fill `tc_name` for every product, translating in parallel waves.
+
+    Returns the indexes that remained untranslated after one retry wave.
+    """
+    total = len(products)
+    failures = []
+    done = 0
+
+    with ThreadPoolExecutor(max_workers=max(1, TRANSLATE_WORKERS)) as pool:
+        for index, tc_name, ok in pool.map(_translate_one, enumerate(products)):
+            products[index]["tc_name"] = tc_name
+            if not ok:
+                failures.append(index)
+            done += 1
+            if done % 10 == 0 or done == total:
+                print(f"   {done}/{total}")
+
+    if failures:
+        # Second wave: retry after a short cool-down (transient throttling)
+        print(f"   Retrying {len(failures)} untranslated name(s)...")
+        time.sleep(2)
+        still = []
+        retry = [(i, products[i]) for i in failures]
+        with ThreadPoolExecutor(max_workers=max(1, TRANSLATE_WORKERS)) as pool:
+            for index, tc_name, ok in pool.map(_translate_one, retry):
+                if ok:
+                    products[index]["tc_name"] = tc_name
+                else:
+                    still.append(index)
+        failures = still
+    return failures
 
 
 def scrape_pbandai(search_url=SEARCH_URL, shop_url=SHOP_URL):
@@ -374,7 +501,8 @@ def scrape_pbandai(search_url=SEARCH_URL, shop_url=SHOP_URL):
                 print(f"⚠️  Load failed: {type(e).__name__}: {e} "
                       f"(attempt {attempt}/{SEARCH_ATTEMPTS})\n")
                 context.close()
-            time.sleep(SEARCH_RETRY_WAIT_S)
+            if attempt < SEARCH_ATTEMPTS:
+                time.sleep(SEARCH_RETRY_WAIT_S)
 
         if search_ok:
             print("✓ Search page loaded\n")
@@ -514,40 +642,19 @@ def main():
     print("  P-BANDAI HK PRODUCT SCRAPER v2 (Playwright)")
     print("=" * 70 + "\n")
     
+    started = time.time()
+
     # Scrape P-Bandai HK products (shop page first, search listing as top-up)
     products = scrape_pbandai()
     
     if products:
-        # Translate product names to Traditional Chinese (deep-translator)
-        print("\n🌐 Translating product names (en → zh-TW)...")
-        failures = 0
-        failed_idx = []
-        for i, p in enumerate(products, 1):
-            core, suffix = _split_delivery_suffix(p["name"])
-            if CJK_RE.search(core):
-                p["tc_name"] = p["name"]  # already Chinese
-            else:
-                tc = translate_name(core)
-                if tc:
-                    p["tc_name"] = tc + suffix
-                else:
-                    p["tc_name"] = p["name"]
-                    failures += 1
-                    failed_idx.append(i - 1)
-            if i % 10 == 0:
-                print(f"   {i}/{len(products)}")
-            time.sleep(0.4)
-
-        # Second pass: retry names that failed (transient rate limits)
-        for idx in failed_idx:
-            core, suffix = _split_delivery_suffix(products[idx]["name"])
-            tc = translate_name(core)
-            if tc:
-                products[idx]["tc_name"] = tc + suffix
-                failures -= 1
-            time.sleep(3)
-
-        print(f"   Done ({len(products)} names, {failures} untranslated)\n")
+        # Translate product names to Traditional Chinese (parallel waves)
+        print(f"\n🌐 Translating product names (en → zh-TW, "
+              f"{TRANSLATE_WORKERS} workers)...")
+        t0 = time.time()
+        failures = _translate_products(products)
+        print(f"   Done ({len(products)} names, {len(failures)} untranslated, "
+              f"{time.time() - t0:.0f}s)\n")
         
         # Save files
         json_file = save_json(products)
@@ -575,6 +682,8 @@ def main():
     else:
         print("\n❌ No products found.")
         print("   Check the URL or site accessibility.\n")
+
+    print(f"⏱️  Total time: {time.time() - started:.0f}s")
 
 if __name__ == "__main__":
     main()
