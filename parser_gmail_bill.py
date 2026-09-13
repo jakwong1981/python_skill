@@ -4,6 +4,9 @@ import re
 import csv
 import time
 from datetime import datetime, timedelta, timezone
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl.utils import get_column_letter
 
 # 套件依賴：pip install google-api-python-client google-auth-oauthlib
 from google.auth.transport.requests import Request
@@ -263,7 +266,7 @@ def is_playstation_non_payment(subject, sender):
         return False
     return True
 
-def scan_and_generate_bill(days=45, output_csv="bill.csv"):
+def scan_and_generate_bill(days=45, output_xlsx="bill.xlsx"):
     service = get_gmail_service()
     
     # 動態計算時間範圍
@@ -366,8 +369,8 @@ def scan_and_generate_bill(days=45, output_csv="bill.csv"):
         card_method = parse_card_info(combined_text) or "Unknown"
             
         orig_amount, hkd_amount = parse_amount(combined_text)
-        # 若找不到 HKD 金額，則跳過不寫入 CSV
-        if not hkd_amount:
+        # 若找不到 HKD 金額或金額為 0，則跳過不寫入 CSV
+        if not hkd_amount or float(hkd_amount) == 0:
             debug_stats["no_amount"] += 1
             # 印出被跳過的郵件主旨（協助除錯）
             if any(k in combined_text.lower() for k in ["playstation", "psn", "sony", "paypal"]):
@@ -409,20 +412,15 @@ def scan_and_generate_bill(days=45, output_csv="bill.csv"):
         deduped_records.append(r)
     records = deduped_records
     
-    # 沒有任何含金額的交易時，不產生 CSV 檔案
+    # 沒有任何含金額的交易時，不產生 Excel 檔案
     if not records:
-        print("未找到任何含金額的交易，未寫入 CSV 檔案。")
+        print("未找到任何含金額的交易，未寫入 Excel 檔案。")
         return
     
-    # 寫入 CSV 檔案
-    fields = ["Date", "Category", "Merchant", "Description", "Amount_Original", "Amount_HKD", "Payment_Method", "Email_Subject", "Receipt_URL"]
-    with open(output_csv, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=fields)
-        writer.writeheader()
-        for r in records:
-            writer.writerow(r)
+    # 寫入 Excel 檔案（摘要置頂）
+    categories, grand_total = write_excel(records, output_xlsx)
             
-    print(f"成功輸出 {output_csv}，共解析出 {len(records)} 筆交易。")
+    print(f"成功輸出 {output_xlsx}，共解析出 {len(records)} 筆交易。")
     print(f"\n[除錯] 過濾統計：")
     print(f"  總郵件數: {debug_stats['total']}")
     print(f"  JobsDB 過濾: {debug_stats['jobsdb']}")
@@ -432,20 +430,48 @@ def scan_and_generate_bill(days=45, output_csv="bill.csv"):
     print(f"  無金額跳過: {debug_stats['no_amount']}")
     print(f"  保留記錄: {debug_stats['kept']}")
     print()
-    print_summary(records, output_csv)
+    print_summary(categories, grand_total, len(records))
 
-def print_summary(records, csv_path):
+def write_excel(records, output_xlsx):
     """
-    輸出分類彙總及總金額（同時寫入 CSV 檔案尾及終端機）。
+    將交易記錄寫入格式化的 Excel 檔案，摘要置頂。
     """
     from collections import OrderedDict
-
+    
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "付款記錄"
+    
+    # 定義樣式
+    title_font = Font(name="Microsoft JhengHei", bold=True, size=14)
+    header_font = Font(name="Microsoft JhengHei", bold=True, color="FFFFFF", size=11)
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    
+    data_font = Font(name="Microsoft JhengHei", size=10)
+    data_alignment = Alignment(vertical="center", wrap_text=True)
+    money_alignment = Alignment(horizontal="right", vertical="center")
+    
+    summary_title_font = Font(name="Microsoft JhengHei", bold=True, size=12)
+    summary_header_font = Font(name="Microsoft JhengHei", bold=True, color="FFFFFF", size=10)
+    summary_header_fill = PatternFill(start_color="70AD47", end_color="70AD47", fill_type="solid")
+    summary_data_font = Font(name="Microsoft JhengHei", size=10)
+    total_font = Font(name="Microsoft JhengHei", bold=True, size=11)
+    total_fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
+    money_fmt = '#,##0.00'
+    
+    thin_border = Border(
+        left=Side(style="thin"),
+        right=Side(style="thin"),
+        top=Side(style="thin"),
+        bottom=Side(style="thin")
+    )
+    
+    # 計算分類彙總
     categories = OrderedDict()
     grand_total = 0.0
-
     for r in records:
         cat = r["Category"]
-        # 優先使用 Amount_HKD，否則從 Amount_Original 提取數字
         hkd_str = r["Amount_HKD"]
         if hkd_str:
             try:
@@ -453,35 +479,122 @@ def print_summary(records, csv_path):
             except ValueError:
                 amt = 0.0
         else:
-            # 從 Amount_Original 提取數字 (如 "HK$ 195.00" → 195.00)
             m = re.search(r"[\d]+(?:\.[\d]{2})?", r["Amount_Original"])
             amt = float(m.group()) if m else 0.0
-
         if cat not in categories:
             categories[cat] = {"count": 0, "total": 0.0}
         categories[cat]["count"] += 1
         categories[cat]["total"] += amt
         grand_total += amt
-
-    # 組裝彙總文字
-    lines = []
-    lines.append("")
-    lines.append("=" * 50)
-    lines.append("付款分類彙總")
-    lines.append("=" * 50)
+    
+    # === 區塊 1：摘要標題 ===
+    current_row = 1
+    ws.merge_cells(f"A{current_row}:C{current_row}")
+    ws.cell(row=current_row, column=1, value="付款分類彙總").font = summary_title_font
+    current_row += 1
+    
+    # 摘要欄標題
+    summary_headers = ["類別", "筆數", "金額 (HK$)"]
+    for col_idx, header in enumerate(summary_headers, 1):
+        cell = ws.cell(row=current_row, column=col_idx, value=header)
+        cell.font = summary_header_font
+        cell.fill = summary_header_fill
+        cell.alignment = Alignment(horizontal="center")
+        cell.border = thin_border
+    current_row += 1
+    
+    # 分類資料
     for cat, info in categories.items():
-        lines.append(f"  {cat:　<10}  {info['count']:>2} 筆  HK$ {info['total']:>10,.2f}")
-    lines.append("-" * 50)
-    lines.append(f"  合計　　　　　　  {len(records):>2} 筆  HK$ {grand_total:>10,.2f}")
-    lines.append("=" * 50)
+        ws.cell(row=current_row, column=1, value=cat).font = summary_data_font
+        ws.cell(row=current_row, column=1).border = thin_border
+        ws.cell(row=current_row, column=2, value=info["count"]).font = summary_data_font
+        ws.cell(row=current_row, column=2).alignment = Alignment(horizontal="center")
+        ws.cell(row=current_row, column=2).border = thin_border
+        ws.cell(row=current_row, column=3, value=info["total"]).font = summary_data_font
+        ws.cell(row=current_row, column=3).number_format = money_fmt
+        ws.cell(row=current_row, column=3).alignment = Alignment(horizontal="right")
+        ws.cell(row=current_row, column=3).border = thin_border
+        current_row += 1
+    
+    # 總計列
+    ws.cell(row=current_row, column=1, value="合計").font = total_font
+    ws.cell(row=current_row, column=1).fill = total_fill
+    ws.cell(row=current_row, column=1).border = thin_border
+    ws.cell(row=current_row, column=2, value=len(records)).font = total_font
+    ws.cell(row=current_row, column=2).fill = total_fill
+    ws.cell(row=current_row, column=2).alignment = Alignment(horizontal="center")
+    ws.cell(row=current_row, column=2).border = thin_border
+    ws.cell(row=current_row, column=3, value=grand_total).font = total_font
+    ws.cell(row=current_row, column=3).fill = total_fill
+    ws.cell(row=current_row, column=3).number_format = money_fmt
+    ws.cell(row=current_row, column=3).alignment = Alignment(horizontal="right")
+    ws.cell(row=current_row, column=3).border = thin_border
+    current_row += 2  # 空一列分隔
+    
+    # === 區塊 2：交易記錄 ===
+    data_start_row = current_row
+    
+    # 欄位定義
+    fields = ["Date", "Category", "Merchant", "Description", "Amount_Original", "Amount_HKD", "Payment_Method", "Email_Subject", "Receipt_URL"]
+    headers = ["日期", "類別", "商戶", "描述", "原始金額", "HKD 金額", "付款方式", "郵件主旨", "收據連結"]
+    col_widths = [12, 12, 25, 40, 15, 12, 15, 40, 30]
+    
+    # 寫入標題列
+    for col_idx, (header, width) in enumerate(zip(headers, col_widths), 1):
+        cell = ws.cell(row=data_start_row, column=col_idx, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = header_alignment
+        cell.border = thin_border
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+    
+    # 寫入資料列
+    for row_idx, record in enumerate(records, data_start_row + 1):
+        for col_idx, field in enumerate(fields, 1):
+            value = record[field]
+            if field == "Amount_HKD" and value:
+                try:
+                    value = float(value)
+                except ValueError:
+                    pass
+            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+            cell.font = data_font
+            cell.border = thin_border
+            if field in ("Amount_Original", "Amount_HKD"):
+                cell.alignment = money_alignment
+                if field == "Amount_HKD" and isinstance(value, (int, float)):
+                    cell.number_format = '#,##0.00'
+            else:
+                cell.alignment = data_alignment
+    
+    # 調整摘要區欄寬
+    ws.column_dimensions["A"].width = 15
+    ws.column_dimensions["B"].width = 10
+    ws.column_dimensions["C"].width = 18
+    
+    # 凍結標題列下方
+    ws.freeze_panes = f"A{data_start_row + 1}"
+    
+    wb.save(output_xlsx)
+    
+    return categories, grand_total
 
-    # 寫入 CSV 檔案尾
-    with open(csv_path, "a", encoding="utf-8-sig") as f:
-        f.write("\n".join(lines) + "\n")
 
-    # 輸出至終端機
-    print("\n".join(lines))
+
+def print_summary(categories, grand_total, total_count):
+    """
+    輸出分類彙總至終端機。
+    """
+    print("")
+    print("=" * 50)
+    print("付款分類彙總")
+    print("=" * 50)
+    for cat, info in categories.items():
+        print(f"  {cat: <10}  {info['count']:>2} 筆  HK$ {info['total']:>10,.2f}")
+    print("-" * 50)
+    print(f"  合計     {total_count:>2} 筆  HK$ {grand_total:>10,.2f}")
+    print("=" * 50)
 
 
 if __name__ == "__main__":
-    scan_and_generate_bill(days=45, output_csv="bill.csv")
+    scan_and_generate_bill(days=45, output_xlsx="bill.xlsx")
