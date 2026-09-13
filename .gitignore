@@ -11,5 +11,9 @@ bill.xlsx
 model_keys_review.xlsx
 pbandai_products*.xlsx
 
+# Python 編譯快取
+__pycache__/
+*.pyc
+
 # macOS
 .DS_Store
