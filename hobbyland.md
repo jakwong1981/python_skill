@@ -19,11 +19,20 @@ For each listed product, extract the following attributes:
 * **Base URL:** `https://www.hobbylandeshop.com/product-category/model_area/gundam_zone/hg_high_grade`
 * **Pagination Scheme:** `https://www.hobbylandeshop.com/product-category/model_area/gundam_zone/hg_high_grade?page={page_number}`
 * **Output Destination:** `hobbyland_hg.csv`
-### 1.1 High Grade animes-pro (HG)
- * **Base URL:** `https://animes-pro.com/collections/high-grade-hg%E6%A8%A1%E5%9E%8B`
- * **API Endpoint:** `https://animes-pro.com/collections/high-grade-hg%E6%A8%A1%E5%9E%8B/products.json`
- * **Pagination:** iterate `?page=1,2,...` until the array is empty (Shopify JSON)
- * **Output Destination:** `animes-pro_hg.csv`
+### 1.1 animes-pro HG / MG / RG
+Same columns as the Hobbyland CSVs (`title`, `price`, `url`, `regular_price`, `sku`, `stock`, `sell_type`). `sku` is the 13-digit JAN taken from the product name, e.g. `Y2700(4573102663849)`.
+
+* **HG**
+  * **Base URL:** `https://animes-pro.com/collections/high-grade-hg%E6%A8%A1%E5%9E%8B`
+  * **API Endpoint:** `https://animes-pro.com/collections/high-grade-hg%E6%A8%A1%E5%9E%8B/products.json`
+  * **Output Destination:** `animes-pro_hg.csv`
+* **MG**
+  * **API Endpoint:** `https://animes-pro.com/collections/master-grade-mg%E6%A8%A1%E5%9E%8B/products.json`
+  * **Output Destination:** `animes-pro_mg.csv`
+* **RG**
+  * **API Endpoint:** `https://animes-pro.com/collections/real-grade-rg%E6%A8%A1%E5%9E%8B/products.json`
+  * **Output Destination:** `animes-pro_rg.csv`
+* **Pagination:** iterate `?page=1,2,...` until the array is empty (Shopify JSON)
 
 ### 2. Master Grade (MG)
 * **Base URL:** `https://www.hobbylandeshop.com/product-category/model_area/gundam_zone/mg_master_grade`

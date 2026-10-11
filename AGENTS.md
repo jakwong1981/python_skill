@@ -8,10 +8,11 @@ or dependency manifest — nothing to install or compile for the repo as a whole
 
 ## Layout
 
-- `hobbyland_scraper.py` — Gunpla catalogue scraper (Hobbyland Vue API + animes-pro Shopify), stdlib only
+- `hobbyland_scraper.py` — Gunpla catalogue scraper (Hobbyland Vue API is stdlib only; the animes-pro `ap_*` categories need Playwright/Chromium — Shopify bot protection blocks plain HTTP)
 - `pbandai_scraper_v2.py` — P-Bandai HK scraper (Playwright/Chromium to bypass Cloudflare)
 - `parser_gmail_bill.py` — Gmail credit-card transaction parser → `bill.csv`
 - `consolidate_model_keys.py` — scan `$HOME` for AI API keys → Excel
+- `task_router.py` — classify a task easy/medium/hard via OpenRouter jev decisions API (`~typesafe/jev-latest`, `OPENROUTER_API_KEY` from `.env`) and echo the route model; `--task - --json` prints `{level, alias, command}` for agents; stdlib only, keyword heuristic fallback
 - `test_*.py` — unittest suites (see Tests); `*.sh` are one-shot setup/launch scripts
 - `venv/` — local Python 3.14 virtualenv (self-ignored); CSV/JSON/XLSX outputs are generated and git-ignored
 
@@ -27,7 +28,7 @@ or dependency manifest — nothing to install or compile for the repo as a whole
   - `pip install playwright deep-translator && python3 -m playwright install chromium` — `pbandai_scraper_v2.py`
   - `pip install torch transformers sentencepiece opencc-python-reimplemented` — optional offline translation fallback for `pbandai_scraper_v2.py` (~310 MB model on first run)
   - `pip install PyYAML` — optional, better Hermes `config.yaml` parsing in `consolidate_model_keys.py`
-- `hobbyland_scraper.py` needs nothing beyond the stdlib.
+- `hobbyland_scraper.py` is stdlib only for `hg`/`mg`/`rg`; `ap_hg`/`ap_mg`/`ap_rg` need `pip install playwright && python3 -m playwright install chromium` (same setup as `pbandai_scraper_v2.py`).
 
 ## Running the scripts
 
@@ -35,7 +36,7 @@ All scripts use relative paths for their inputs/outputs — run them from the re
 
 | Script | Command | Output |
 |---|---|---|
-| Hobbyland | `python3 hobbyland_scraper.py` or `python3 hobbyland_scraper.py hg rg ap_hg` | `hobbyland_hg.csv` / `_mg.csv` / `_rg.csv`, `animes-pro_hg.csv` |
+| Hobbyland | `python3 hobbyland_scraper.py` or `python3 hobbyland_scraper.py hg rg ap_hg ap_mg ap_rg` | `hobbyland_hg.csv` / `_mg.csv` / `_rg.csv`, `animes-pro_hg.csv` / `_mg.csv` / `_rg.csv` |
 | P-Bandai | `python3 pbandai_scraper_v2.py` | `pbandai_products.csv` / `.json` / `.xlsx` |
 | Gmail bill | `python3 parser_gmail_bill.py` | `bill.csv` (only if ≥1 email has an amount) |
 | Key scan | `python3 consolidate_model_keys.py [--full] [--out PATH]` | Excel (values masked by default) |
