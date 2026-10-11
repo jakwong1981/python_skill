@@ -20,5 +20,9 @@ pbandai_products*.xlsx
 __pycache__/
 *.pyc
 
+# AI 工具產物：debug session 封包與 agent 計劃檔（純本地除錯用，不提交）
+kimi-debug-session_*.zip
+.hermes/
+
 # macOS
 .DS_Store
